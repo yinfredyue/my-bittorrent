@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"strconv"
 	"strings"
@@ -49,7 +50,7 @@ type Torrent struct {
 	info       Info
 }
 
-func decodeTorrent(s string) (*Torrent, error) {
+func parseTorrent(s string) (*Torrent, error) {
 	decoded_raw, err := decode.Decode(s)
 	if err != nil {
 		return nil, err
@@ -85,6 +86,60 @@ func decodeTorrent(s string) (*Torrent, error) {
 	}
 
 	return &torrent, nil
+}
+
+func (torrent *Torrent) discoverPeers() ([]netip.AddrPort, error) {
+	req, err := http.NewRequest("GET", torrent.trackerUrl, nil)
+	if err != nil {
+		return []netip.AddrPort{}, err
+	}
+
+	info_hash, err := torrent.info.hash()
+	if err != nil {
+		return []netip.AddrPort{}, err
+	}
+
+	query := req.URL.Query()
+	query.Add("info_hash", string(info_hash))
+	query.Add("peer_id", "deadbeefliveporkhaha")
+	query.Add("port", "6881")
+	query.Add("uploaded", "0")
+	query.Add("downloaded", "0")
+	query.Add("left", strconv.Itoa(torrent.info.length))
+	query.Add("compact", "1")
+	req.URL.RawQuery = query.Encode()
+
+	client := http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return []netip.AddrPort{}, err
+	}
+
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return []netip.AddrPort{}, err
+	}
+
+	decoded_resp, err := decode.Decode(string(body))
+	if err != nil {
+		return []netip.AddrPort{}, err
+	}
+
+	decoded_dict := decoded_resp.(map[string](interface{}))
+	peers := decoded_dict["peers"].(string)
+	peer_addrports := make([]netip.AddrPort, 0)
+	for i := 0; i < len(peers); i += 6 {
+		// Each peer is represented with 6 bytes.
+		// First 4 bytes is IP, where each byte is a number in the IP.
+		// Last 2 bytes is port, in big-endian order.
+		port := binary.BigEndian.Uint16([]byte(peers[i+4 : i+6]))
+		addrBytes := [4]byte{peers[i], peers[i+1], peers[i+2], peers[i+3]}
+		addrport := netip.AddrPortFrom(netip.AddrFrom4(addrBytes), port)
+		peer_addrports = append(peer_addrports, addrport)
+	}
+
+	return peer_addrports, nil
 }
 
 func exit_on_error(err error) {
@@ -127,7 +182,7 @@ func main() {
 		bytes, err := os.ReadFile(filename)
 		exit_on_error(err)
 
-		torrent, err := decodeTorrent(string(bytes))
+		torrent, err := parseTorrent(string(bytes))
 		exit_on_error(err)
 
 		fmt.Printf("Tracker URL: %s\n", torrent.trackerUrl)
@@ -152,47 +207,14 @@ func main() {
 		bytes, err := os.ReadFile(filename)
 		exit_on_error(err)
 
-		// decode
-		torrent, err := decodeTorrent(string(bytes))
+		torrent, err := parseTorrent(string(bytes))
 		exit_on_error(err)
 
-		// discover peers
-		req, err := http.NewRequest("GET", torrent.trackerUrl, nil)
+		peers, err := torrent.discoverPeers()
 		exit_on_error(err)
 
-		info_hash, err := torrent.info.hash()
-		exit_on_error(err)
-
-		query := req.URL.Query()
-		query.Add("info_hash", string(info_hash))
-		query.Add("peer_id", "deadbeefliveporkhaha")
-		query.Add("port", "6881")
-		query.Add("uploaded", "0")
-		query.Add("downloaded", "0")
-		query.Add("left", strconv.Itoa(torrent.info.length))
-		query.Add("compact", "1")
-		req.URL.RawQuery = query.Encode()
-
-		client := http.Client{}
-		resp, err := client.Do(req)
-		exit_on_error(err)
-
-		defer resp.Body.Close()
-		body, err := io.ReadAll(resp.Body)
-		exit_on_error(err)
-
-		decoded_resp, err := decode.Decode(string(body))
-		exit_on_error(err)
-
-		decoded_dict := decoded_resp.(map[string](interface{}))
-		peers := decoded_dict["peers"].(string)
-		for i := 0; i < len(peers); i += 6 {
-			// Each peer is represented with 6 bytes.
-			// First 4 bytes is IP, where each byte is a number in the IP.
-			// Last 2 bytes is port, in big-endian order.
-			ip := fmt.Sprintf("%v.%v.%v.%v", peers[i], peers[i+1], peers[i+2], peers[i+3])
-			port := binary.BigEndian.Uint16([]byte(peers[i+4 : i+6]))
-			fmt.Printf("%v:%v\n", ip, port)
+		for _, peer := range peers {
+			fmt.Printf("%v\n", peer)
 		}
 	} else if command == "handshake" {
 		if len(os.Args) != 4 {
@@ -206,7 +228,7 @@ func main() {
 		bytes, err := os.ReadFile(filename)
 		exit_on_error(err)
 
-		torrent, err := decodeTorrent(string(bytes))
+		torrent, err := parseTorrent(string(bytes))
 		exit_on_error(err)
 
 		info_hash, err := torrent.info.hash()
@@ -234,6 +256,8 @@ func main() {
 		exit_on_error(err)
 
 		fmt.Printf("Peer ID: %v\n", hex.EncodeToString(response[48:]))
+	} else if command == "download_piece" {
+
 	} else {
 		fmt.Println("Unknown command: " + command)
 		os.Exit(1)
