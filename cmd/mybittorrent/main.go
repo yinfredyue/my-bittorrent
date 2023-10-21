@@ -10,53 +10,99 @@ import (
 	// bencode "github.com/jackpal/bencode-go" // Available if you need it!
 )
 
-// Example:
-// - 5:hello -> hello
-// - 10:hello12345 -> hello12345
-func decodeBencode(bencodedString string) (interface{}, error) {
-	first_char := bencodedString[0]
-	last_char := bencodedString[len(bencodedString)-1]
+func isDigit(c byte) bool {
+	return unicode.IsDigit(rune(c))
+}
 
-	if unicode.IsDigit(rune(first_char)) {
-		var firstColonIndex int
+func decodeFrom(str string, start int) (interface{}, int, error) {
+	first_char := str[start]
 
-		for i := 0; i < len(bencodedString); i++ {
-			if bencodedString[i] == ':' {
-				firstColonIndex = i
+	if isDigit(first_char) {
+		// 5:hello -> hello
+		var colonIndex int
+
+		for i := start + 1; i < len(str); i++ {
+			if str[i] == ':' {
+				colonIndex = i
 				break
 			}
 		}
 
-		lengthStr := bencodedString[:firstColonIndex]
-
-		length, err := strconv.Atoi(lengthStr)
+		length, err := strconv.Atoi(str[start:colonIndex])
 		if err != nil {
-			return "", err
+			return "", 0, err
 		}
 
-		return bencodedString[firstColonIndex+1 : firstColonIndex+1+length], nil
-	} else if first_char == 'i' && last_char == 'e' {
-		return strconv.Atoi(bencodedString[1:(len(bencodedString) - 1)])
-	} else {
-		return "", fmt.Errorf("Only strings are supported at the moment")
+		return str[colonIndex+1 : colonIndex+1+length], colonIndex + length, nil
+	} else if first_char == 'i' {
+		// i52e -> 52
+		var nonDigitIndex int
+
+		for i := start + 1; i < len(str); i++ {
+			if !(isDigit(str[i])) {
+				nonDigitIndex = i
+				break
+			}
+		}
+
+		integer, err := strconv.Atoi(str[start+1 : nonDigitIndex])
+		return integer, nonDigitIndex, err
+	} else if first_char == 'l' {
+		// l5:helloi52ee -> ["hello", 52]
+		curr := start + 1
+		res := [](interface{}){}
+
+		for str[curr] != 'e' {
+			decoded, endIdx, err := decodeFrom(str, curr)
+			if err != nil {
+				return [](interface{}){}, 0, err
+			}
+
+			res = append(res, decoded)
+			curr = endIdx + 1
+		}
+
+		return res, curr, nil
 	}
+
+	return nil, 0, fmt.Errorf("unexpected case?")
+}
+
+func decode(str string) ([]interface{}, error) {
+	res := [](interface{}){}
+
+	curr := 0
+	for curr < len(str) {
+		decoded, endIdx, err := decodeFrom(str, curr)
+		if err != nil {
+			return [](interface{}){}, err
+		}
+
+		curr = endIdx + 1
+		res = append(res, decoded)
+	}
+
+	return res, nil
 }
 
 func main() {
 	command := os.Args[1]
 
 	if command == "decode" {
-		// Uncomment this block to pass the first stage
-
 		bencodedValue := os.Args[2]
 
-		decoded, err := decodeBencode(bencodedValue)
+		decoded, err := decode(bencodedValue)
 		if err != nil {
 			fmt.Println(err)
 			return
 		}
 
-		jsonOutput, _ := json.Marshal(decoded)
+		var jsonOutput []byte
+		if len(decoded) == 1 {
+			jsonOutput, _ = json.Marshal(decoded[0])
+		} else {
+			jsonOutput, _ = json.Marshal(decoded)
+		}
 		fmt.Println(string(jsonOutput))
 	} else {
 		fmt.Println("Unknown command: " + command)
