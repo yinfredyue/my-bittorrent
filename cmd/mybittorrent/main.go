@@ -14,7 +14,10 @@ import (
 // - 5:hello -> hello
 // - 10:hello12345 -> hello12345
 func decodeBencode(bencodedString string) (interface{}, error) {
-	if unicode.IsDigit(rune(bencodedString[0])) {
+	first_char := bencodedString[0]
+	last_char := bencodedString[len(bencodedString)-1]
+
+	if unicode.IsDigit(rune(first_char)) {
 		var firstColonIndex int
 
 		for i := 0; i < len(bencodedString); i++ {
@@ -32,6 +35,8 @@ func decodeBencode(bencodedString string) (interface{}, error) {
 		}
 
 		return bencodedString[firstColonIndex+1 : firstColonIndex+1+length], nil
+	} else if first_char == 'i' && last_char == 'e' {
+		return strconv.Atoi(bencodedString[1:(len(bencodedString) - 1)])
 	} else {
 		return "", fmt.Errorf("Only strings are supported at the moment")
 	}
@@ -42,15 +47,15 @@ func main() {
 
 	if command == "decode" {
 		// Uncomment this block to pass the first stage
-		
+
 		bencodedValue := os.Args[2]
-		
+
 		decoded, err := decodeBencode(bencodedValue)
 		if err != nil {
 			fmt.Println(err)
 			return
 		}
-		
+
 		jsonOutput, _ := json.Marshal(decoded)
 		fmt.Println(string(jsonOutput))
 	} else {
