@@ -28,12 +28,7 @@ func main() {
 			return
 		}
 
-		var jsonOutput []byte
-		if len(decoded) == 1 {
-			jsonOutput, _ = json.Marshal(decoded[0])
-		} else {
-			jsonOutput, _ = json.Marshal(decoded)
-		}
+		jsonOutput, _ := json.Marshal(decoded)
 		fmt.Println(string(jsonOutput))
 	} else {
 		fmt.Println("Unknown command: " + command)

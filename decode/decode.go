@@ -10,7 +10,7 @@ func isDigit(c byte) bool {
 	return unicode.IsDigit(rune(c))
 }
 
-func decodeFrom(str string, start int) (interface{}, int, error) {
+func decodeOneFrom(str string, start int) (interface{}, int, error) {
 	first_char := str[start]
 
 	if isDigit(first_char) {
@@ -51,7 +51,7 @@ func decodeFrom(str string, start int) (interface{}, int, error) {
 		res := [](interface{}){}
 
 		for str[curr] != 'e' {
-			decoded, endIdx, err := decodeFrom(str, curr)
+			decoded, endIdx, err := decodeOneFrom(str, curr)
 			if err != nil {
 				return [](interface{}){}, 0, err
 			}
@@ -61,24 +61,38 @@ func decodeFrom(str string, start int) (interface{}, int, error) {
 		}
 
 		return res, curr, nil
+	} else if first_char == 'd' {
+		res := map[string](interface{}){}
+
+		curr := start + 1
+		for str[curr] != 'e' {
+			decoded, endIdx, err := decodeOneFrom(str, curr)
+			decoded_key, ok := decoded.(string)
+			if !ok || err != nil {
+				return [](interface{}){}, 0, err
+			}
+
+			decoded_val, endIdx, err := decodeOneFrom(str, endIdx+1)
+			if err != nil {
+				return [](interface{}){}, 0, err
+			}
+
+			res[decoded_key] = decoded_val
+			curr = endIdx + 1
+		}
+
+		return res, curr, nil
 	}
 
 	return nil, 0, fmt.Errorf("unexpected case?")
 }
 
-func Decode(str string) ([]interface{}, error) {
-	res := [](interface{}){}
+func Decode(str string) (interface{}, error) {
+	res, endIdx, err := decodeOneFrom(str, 0)
 
-	curr := 0
-	for curr < len(str) {
-		decoded, endIdx, err := decodeFrom(str, curr)
-		if err != nil {
-			return [](interface{}){}, err
-		}
-
-		curr = endIdx + 1
-		res = append(res, decoded)
+	if endIdx != len(str)-1 {
+		return [](interface{}){}, fmt.Errorf("didn't consume entire string?")
 	}
 
-	return res, nil
+	return res, err
 }
