@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -88,7 +89,7 @@ func decodeTorrent(s string) (*Torrent, error) {
 
 func exit_on_error(err error) {
 	if err != nil {
-		fmt.Println(err)
+		fmt.Printf("Error: %v\n", err)
 		os.Exit(1)
 	}
 }
@@ -189,10 +190,50 @@ func main() {
 			// Each peer is represented with 6 bytes.
 			// First 4 bytes is IP, where each byte is a number in the IP.
 			// Last 2 bytes is port, in big-endian order.
-			ip := fmt.Sprintf("%v:%v:%v:%v", peers[i], peers[i+1], peers[i+2], peers[i+3])
+			ip := fmt.Sprintf("%v.%v.%v.%v", peers[i], peers[i+1], peers[i+2], peers[i+3])
 			port := binary.BigEndian.Uint16([]byte(peers[i+4 : i+6]))
 			fmt.Printf("%v:%v\n", ip, port)
 		}
+	} else if command == "handshake" {
+		if len(os.Args) != 4 {
+			fmt.Println("Expect a file name and a peer address")
+			os.Exit(1)
+		}
+
+		filename := os.Args[2]
+		peer_address := os.Args[3]
+
+		bytes, err := os.ReadFile(filename)
+		exit_on_error(err)
+
+		torrent, err := decodeTorrent(string(bytes))
+		exit_on_error(err)
+
+		info_hash, err := torrent.info.hash()
+		exit_on_error(err)
+
+		conn, err := net.Dial("tcp", peer_address)
+		exit_on_error(err)
+
+		defer conn.Close()
+
+		var sb strings.Builder
+		sb.WriteByte(19)
+		sb.WriteString("BitTorrent protocol") // Don't capitalize "protocol"
+		for i := 0; i < 8; i++ {
+			sb.WriteByte(0)
+		}
+		sb.Write(info_hash)
+		sb.Write([]byte("deadbeefliveporkhaha"))
+
+		_, err = conn.Write([]byte(sb.String()))
+		exit_on_error(err)
+
+		response := make([]byte, 68)
+		_, err = conn.Read(response)
+		exit_on_error(err)
+
+		fmt.Printf("Peer ID: %v\n", hex.EncodeToString(response[48:]))
 	} else {
 		fmt.Println("Unknown command: " + command)
 		os.Exit(1)
