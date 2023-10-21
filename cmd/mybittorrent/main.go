@@ -51,17 +51,8 @@ func main() {
 		decoded_raw, err := decode.Decode(torrent)
 		exit_on_error(err)
 
-		decoded, ok := decoded_raw.(map[string](interface{}))
-		if !ok {
-			fmt.Println("Expect a dict")
-			os.Exit(1)
-		}
-
-		info, ok := decoded["info"].(map[string](interface{}))
-		if !ok {
-			fmt.Println("Expect a dict of info")
-			os.Exit(1)
-		}
+		decoded := decoded_raw.(map[string](interface{}))
+		info := decoded["info"].(map[string](interface{}))
 
 		fmt.Printf("Tracker URL: %s\n", decoded["announce"])
 		fmt.Printf("Length: %d\n", info["length"])
@@ -74,6 +65,14 @@ func main() {
 		hash := hex.EncodeToString(h.Sum(nil))
 
 		fmt.Printf("Info hash: %s\n", hash)
+		fmt.Printf("Piece Length: %v\n", info["piece length"])
+
+		fmt.Printf("Piece Hashes:\n")
+		pieces := info["pieces"].(string)
+		for i := 0; i < len(pieces); i += 20 {
+			piece_hash := hex.EncodeToString([]byte(pieces[i : i+20]))
+			fmt.Printf("%v\n", piece_hash)
+		}
 	} else {
 		fmt.Println("Unknown command: " + command)
 		os.Exit(1)
