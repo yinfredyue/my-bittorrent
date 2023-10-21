@@ -1,11 +1,14 @@
 package main
 
 import (
+	"crypto/sha1"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 
 	"github.com/codecrafters-io/bittorrent-starter-go/decode"
+	"github.com/codecrafters-io/bittorrent-starter-go/encode"
 )
 
 func exit_on_error(err error) {
@@ -54,14 +57,23 @@ func main() {
 			os.Exit(1)
 		}
 
-		decoded_info, ok := decoded["info"].(map[string](interface{}))
+		info, ok := decoded["info"].(map[string](interface{}))
 		if !ok {
 			fmt.Println("Expect a dict of info")
 			os.Exit(1)
 		}
 
 		fmt.Printf("Tracker URL: %s\n", decoded["announce"])
-		fmt.Printf("Length: %d\n", decoded_info["length"])
+		fmt.Printf("Length: %d\n", info["length"])
+
+		encoded_info, err := encode.Encode(info)
+		exit_on_error(err)
+
+		h := sha1.New()
+		h.Write([]byte(encoded_info))
+		hash := hex.EncodeToString(h.Sum(nil))
+
+		fmt.Printf("Info hash: %s\n", hash)
 	} else {
 		fmt.Println("Unknown command: " + command)
 		os.Exit(1)
