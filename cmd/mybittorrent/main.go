@@ -10,10 +10,81 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/codecrafters-io/bittorrent-starter-go/decode"
 	"github.com/codecrafters-io/bittorrent-starter-go/encode"
 )
+
+type Info struct {
+	length      int
+	name        string
+	pieceLength int
+	pieces      [](string) // binary format, not hex format
+}
+
+func (info *Info) hash() ([]byte, error) {
+	dict := map[string](interface{}){
+		"length":       info.length,
+		"name":         info.name,
+		"piece length": info.pieceLength,
+		"pieces":       strings.Join(info.pieces, ""),
+	}
+
+	encoded_info, err := encode.Encode(dict)
+	if err != nil {
+		return []byte{}, err
+	}
+
+	h := sha1.New()
+	h.Write([]byte(encoded_info))
+	info_hash := h.Sum(nil)
+
+	return info_hash, nil
+}
+
+type Torrent struct {
+	trackerUrl string
+	info       Info
+}
+
+func decodeTorrent(s string) (*Torrent, error) {
+	decoded_raw, err := decode.Decode(s)
+	if err != nil {
+		return nil, err
+	}
+
+	decoded := decoded_raw.(map[string](interface{}))
+	trackerUrl := decoded["announce"].(string)
+	info_dict := decoded["info"].(map[string](interface{}))
+	length := info_dict["length"].(int)
+	name := info_dict["name"].(string)
+	pieceLength := info_dict["piece length"].(int)
+	if err != nil {
+		return nil, err
+	}
+
+	pieces_raw := info_dict["pieces"].(string)
+	pieces := make([](string), 0)
+	for i := 0; i < len(pieces_raw); i += 20 {
+		pieceHash := (pieces_raw[i : i+20])
+		pieces = append(pieces, pieceHash)
+	}
+
+	info := Info{
+		length:      length,
+		name:        name,
+		pieceLength: pieceLength,
+		pieces:      pieces,
+	}
+
+	torrent := Torrent{
+		trackerUrl: trackerUrl,
+		info:       info,
+	}
+
+	return &torrent, nil
+}
 
 func exit_on_error(err error) {
 	if err != nil {
@@ -55,37 +126,20 @@ func main() {
 		bytes, err := os.ReadFile(filename)
 		exit_on_error(err)
 
-		// decode
-		torrent := string(bytes)
-		decoded_raw, err := decode.Decode(torrent)
+		torrent, err := decodeTorrent(string(bytes))
 		exit_on_error(err)
 
-		decoded := decoded_raw.(map[string](interface{}))
-		trackerUrl := decoded["announce"].(string)
-		info := decoded["info"].(map[string](interface{}))
-		length := info["length"].(int)
+		fmt.Printf("Tracker URL: %s\n", torrent.trackerUrl)
+		fmt.Printf("Length: %d\n", torrent.info.length)
+
+		info_hash, err := torrent.info.hash()
 		exit_on_error(err)
-
-		fmt.Printf("Tracker URL: %s\n", trackerUrl)
-		fmt.Printf("Length: %d\n", length)
-
-		// extract info hash
-		encoded_info, err := encode.Encode(info)
-		exit_on_error(err)
-
-		h := sha1.New()
-		h.Write([]byte(encoded_info))
-		info_hash := h.Sum(nil)
-
 		fmt.Printf("Info Hash: %s\n", hex.EncodeToString(info_hash))
 
-		// extract pieces
-		fmt.Printf("Piece Length: %v\n", info["piece length"])
+		fmt.Printf("Piece Length: %v\n", torrent.info.pieceLength)
 		fmt.Printf("Piece Hashes:\n")
-		pieces := info["pieces"].(string)
-		for i := 0; i < len(pieces); i += 20 {
-			piece_hash := hex.EncodeToString([]byte(pieces[i : i+20]))
-			fmt.Printf("%v\n", piece_hash)
+		for _, piece_hash := range torrent.info.pieces {
+			fmt.Printf("%v\n", hex.EncodeToString([]byte(piece_hash)))
 		}
 	} else if command == "peers" {
 		if len(os.Args) != 3 {
@@ -98,26 +152,14 @@ func main() {
 		exit_on_error(err)
 
 		// decode
-		torrent := string(bytes)
-		decoded_raw, err := decode.Decode(torrent)
+		torrent, err := decodeTorrent(string(bytes))
 		exit_on_error(err)
-
-		decoded := decoded_raw.(map[string](interface{}))
-		trackerUrl := decoded["announce"].(string)
-		info := decoded["info"].(map[string](interface{}))
-		length := info["length"].(int)
-		exit_on_error(err)
-
-		// extract info hash
-		encoded_info, err := encode.Encode(info)
-		exit_on_error(err)
-
-		h := sha1.New()
-		h.Write([]byte(encoded_info))
-		info_hash := h.Sum(nil)
 
 		// discover peers
-		req, err := http.NewRequest("GET", trackerUrl, nil)
+		req, err := http.NewRequest("GET", torrent.trackerUrl, nil)
+		exit_on_error(err)
+
+		info_hash, err := torrent.info.hash()
 		exit_on_error(err)
 
 		query := req.URL.Query()
@@ -126,7 +168,7 @@ func main() {
 		query.Add("port", "6881")
 		query.Add("uploaded", "0")
 		query.Add("downloaded", "0")
-		query.Add("left", strconv.Itoa(length))
+		query.Add("left", strconv.Itoa(torrent.info.length))
 		query.Add("compact", "1")
 		req.URL.RawQuery = query.Encode()
 
