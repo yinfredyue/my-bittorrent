@@ -86,6 +86,10 @@ func parseTorrent(s string) (*Torrent, error) {
 	return &torrent, nil
 }
 
+func (torrent *Torrent) numPieces() int {
+	return len(torrent.info.pieces)
+}
+
 func (torrent *Torrent) discoverPeers() ([]netip.AddrPort, error) {
 	req, err := http.NewRequest("GET", torrent.trackerUrl, nil)
 	if err != nil {
@@ -208,7 +212,7 @@ func (torrent *Torrent) downloadPiece(piece int) ([]byte, error) {
 	// send a request message
 	// read a piece message
 	var pieceLength int
-	if piece < len(torrent.info.pieces)-1 {
+	if piece < torrent.numPieces()-1 {
 		pieceLength = torrent.info.pieceLength
 	} else {
 		pieceLength = torrent.info.length % torrent.info.pieceLength

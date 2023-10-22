@@ -127,7 +127,7 @@ func main() {
 
 		fmt.Printf("Peer ID: %v\n", hex.EncodeToString(response[48:]))
 	} else if command == "download_piece" {
-		if len(os.Args) < 6 {
+		if len(os.Args) != 6 {
 			fmt.Println("Expect: -o output_file torrent_file piece_index")
 		}
 		outputFilename := os.Args[3]
@@ -149,6 +149,32 @@ func main() {
 		exit_on_error(err)
 
 		fmt.Printf("Piece %v downloaded to %v\n", piece, outputFilename)
+	} else if command == "download" {
+		if len(os.Args) != 5 {
+			fmt.Println("Expect: -o output_file torrent_file")
+		}
+		outputFilename := os.Args[3]
+		torrentFilename := os.Args[4]
+
+		bytes, err := os.ReadFile(torrentFilename)
+		exit_on_error(err)
+
+		torrent, err := parseTorrent(string(bytes))
+		exit_on_error(err)
+
+		outputFile, err := os.OpenFile(outputFilename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		exit_on_error(err)
+		defer outputFile.Close()
+
+		for p := 0; p < torrent.numPieces(); p++ {
+			piece, err := torrent.downloadPiece(p)
+			exit_on_error(err)
+
+			_, err = outputFile.Write(piece)
+			exit_on_error(err)
+		}
+
+		fmt.Printf("Downloaded %v to %v\n", torrent.info.name, outputFilename)
 	} else {
 		fmt.Println("Unknown command: " + command)
 		os.Exit(1)
