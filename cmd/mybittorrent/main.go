@@ -346,22 +346,27 @@ func main() {
 		assert(uint8(unchokeMsg[4]) == 1, "unchoke message should have message id = 1")
 		DPrintf("unchoke message received\n")
 
-		pieceData := make([]byte, torrent.info.pieceLength)
-
 		// for each block in the piece:
 		// send a request message
 		// read a piece message
-		DPrintf("pieceLength: %v\n", torrent.info.pieceLength)
-		for blockIdx := 0; blockIdx*BlockMaxSize < torrent.info.pieceLength; blockIdx++ {
+		var pieceLength int
+		if piece < len(torrent.info.pieces)-1 {
+			pieceLength = torrent.info.pieceLength
+		} else {
+			pieceLength = torrent.info.length % torrent.info.pieceLength
+		}
+		pieceData := make([]byte, pieceLength)
+		DPrintf("pieceLength: %v\n", pieceLength)
+		for blockIdx := 0; blockIdx*BlockMaxSize < pieceLength; blockIdx++ {
 			// request message
 			var blockSize int
-			if (blockIdx+1)*BlockMaxSize < torrent.info.pieceLength {
+			if (blockIdx+1)*BlockMaxSize < pieceLength {
 				blockSize = BlockMaxSize
 			} else {
-				blockSize = torrent.info.pieceLength - blockIdx*BlockMaxSize
+				blockSize = pieceLength - blockIdx*BlockMaxSize
 			}
 			DPrintf("BlockIdx: %v, BlockSize: %v\n", blockIdx, blockSize)
-			blockOffset := blockIdx * blockSize
+			blockOffset := blockIdx * BlockMaxSize
 
 			// 4-byte message length, 1-byte message id, and a payload of:
 			// - 4-byte block index
@@ -414,8 +419,8 @@ func main() {
 			for writeOffset := 0; totalBytesToRead > 0; {
 				bytesRead, err = conn.Read(pieceData[blockOffset+writeOffset:])
 				exit_on_error(err)
-				DPrintf("writeOffset+blockOffset: %v, bytesRead: %v, Finished at: %v\n",
-					writeOffset+blockOffset, bytesRead, writeOffset+blockOffset+bytesRead)
+				DPrintf("totalBytesToRead: %v, writeOffset+blockOffset: %v, bytesRead: %v, Finished at: %v\n",
+					totalBytesToRead, writeOffset+blockOffset, bytesRead, writeOffset+blockOffset+bytesRead)
 
 				totalBytesToRead -= bytesRead
 				writeOffset += bytesRead
