@@ -18,6 +18,8 @@ import (
 	"github.com/codecrafters-io/bittorrent-starter-go/encode"
 )
 
+const BlockMaxSize = 16 * 1024
+
 type Info struct {
 	length      int
 	name        string
@@ -142,10 +144,43 @@ func (torrent *Torrent) discoverPeers() ([]netip.AddrPort, error) {
 	return peer_addrports, nil
 }
 
+func HandshakeMsg(infoHash []byte, peerId []byte) string {
+	var sb strings.Builder
+	sb.WriteByte(19)
+	sb.WriteString("BitTorrent protocol") // Don't capitalize "protocol"
+	for i := 0; i < 8; i++ {
+		sb.WriteByte(0)
+	}
+	sb.Write(infoHash)
+	sb.Write([]byte("deadbeefliveporkhaha"))
+
+	return sb.String()
+}
+
+// Convert uint32 to big-endian bytes. Return a []byte with `numBytes`. Zeros
+// are added to the front.
+func uint32_to_bytes(val uint32, numBytes int) []byte {
+	if numBytes >= 4 {
+		res := make([]byte, numBytes, 4)
+		binary.BigEndian.PutUint32(res[numBytes-4:], val)
+		return res
+	}
+
+	res := make([]byte, 4)
+	binary.BigEndian.PutUint32(res, val)
+	return res[4-numBytes:]
+}
+
 func exit_on_error(err error) {
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
 		os.Exit(1)
+	}
+}
+
+func assert(condition bool, errMsg string) {
+	if !condition {
+		panic(errMsg)
 	}
 }
 
@@ -231,7 +266,7 @@ func main() {
 		torrent, err := parseTorrent(string(bytes))
 		exit_on_error(err)
 
-		info_hash, err := torrent.info.hash()
+		infoHash, err := torrent.info.hash()
 		exit_on_error(err)
 
 		conn, err := net.Dial("tcp", peer_address)
@@ -239,16 +274,8 @@ func main() {
 
 		defer conn.Close()
 
-		var sb strings.Builder
-		sb.WriteByte(19)
-		sb.WriteString("BitTorrent protocol") // Don't capitalize "protocol"
-		for i := 0; i < 8; i++ {
-			sb.WriteByte(0)
-		}
-		sb.Write(info_hash)
-		sb.Write([]byte("deadbeefliveporkhaha"))
-
-		_, err = conn.Write([]byte(sb.String()))
+		handshakeMsg := HandshakeMsg(infoHash, []byte("deadbeefliveporkhaha"))
+		_, err = conn.Write([]byte(handshakeMsg))
 		exit_on_error(err)
 
 		response := make([]byte, 68)
@@ -257,7 +284,145 @@ func main() {
 
 		fmt.Printf("Peer ID: %v\n", hex.EncodeToString(response[48:]))
 	} else if command == "download_piece" {
+		if len(os.Args) < 6 {
+			fmt.Println("Expect: -o output_file torrent_file piece_index")
+		}
+		outputFilename := os.Args[3]
+		filename := os.Args[4]
+		piece, err := strconv.Atoi(os.Args[5])
+		exit_on_error(err)
+		DPrintf("Piece: %v\n", piece)
 
+		bytes, err := os.ReadFile(filename)
+		exit_on_error(err)
+
+		torrent, err := parseTorrent(string(bytes))
+		exit_on_error(err)
+
+		peers, err := torrent.discoverPeers()
+		exit_on_error(err)
+
+		infoHash, err := torrent.info.hash()
+		exit_on_error(err)
+
+		peer := peers[0]
+		conn, err := net.Dial("tcp", peer.String())
+		exit_on_error(err)
+
+		defer conn.Close()
+
+		handshakeMsg := HandshakeMsg(infoHash, []byte("deadbeefliveporkhaha"))
+		bytesWritten, err := conn.Write([]byte(handshakeMsg))
+		assert(bytesWritten == 68, "Expect to write 68 bytes for handshake")
+		exit_on_error(err)
+
+		// handshake response
+		response := make([]byte, 68)
+		bytesRead, err := conn.Read(response)
+		exit_on_error(err)
+		assert(bytesRead == 68, "Expect handshake response to be 68 bytes")
+		DPrintf("handshake response received\n")
+
+		// bitfield message
+		bitfieldMsg := make([]byte, 128)
+		bytesRead, err = conn.Read(bitfieldMsg)
+		exit_on_error(err)
+		assert(bytesRead >= 5, "Expect to read at least 5 bytes")
+		assert(uint8(bitfieldMsg[4]) == 5, "bitfield message should have message id = 5")
+		DPrintf("bitfield received\n")
+
+		// send interested message
+		interestedMsg := [5]byte{0, 0, 0, 5, 2}
+		bytesWritten, err = conn.Write(interestedMsg[:])
+		assert(bytesWritten == 5, "Expect to write 5 bytes for interested message")
+		exit_on_error(err)
+		DPrintf("interested message sent\n")
+
+		// unchoke message
+		unchokeMsg := make([]byte, 128)
+		bytesRead, err = conn.Read(unchokeMsg)
+		exit_on_error(err)
+		assert(bytesRead == 5, "Expect to read 5 bytes for unchoke message")
+		assert(uint8(unchokeMsg[4]) == 1, "unchoke message should have message id = 1")
+		DPrintf("unchoke message received\n")
+
+		pieceData := make([]byte, torrent.info.pieceLength)
+
+		// for each block in the piece:
+		// send a request message
+		// read a piece message
+		for blockIdx := 0; blockIdx*BlockMaxSize < torrent.info.pieceLength; blockIdx++ {
+			// request message
+			var blockSize int
+			if (blockIdx+1)*BlockMaxSize < torrent.info.pieceLength {
+				blockSize = BlockMaxSize
+			} else {
+				blockSize = torrent.info.pieceLength - blockIdx*BlockMaxSize
+			}
+			DPrintf("BlockIdx: %v, BlockSize: %v\n", blockIdx, blockSize)
+			blockOffset := blockIdx * blockSize
+
+			// 4-byte message length, 1-byte message id, and a payload of:
+			// - 4-byte block index
+			// - 4-byte block offset within the piece (in bytes)
+			// - 4-byte block length
+			// Note: message length starts counting from the message id.
+			msgLengthBytes := uint32_to_bytes(13, 4)
+			msgIdBytes := uint32_to_bytes(6, 1)
+			blockIdxBytes := uint32_to_bytes(uint32(blockIdx), 4)
+			blockOffsetBytes := uint32_to_bytes(uint32(blockOffset), 4)
+			blockLengthBytes := uint32_to_bytes(uint32(blockSize), 4)
+			bytesToWrite := []([]byte){msgLengthBytes, msgIdBytes, blockIdxBytes, blockOffsetBytes, blockLengthBytes}
+
+			var requestMsg [17]byte
+			writeIdx := 0
+			for _, bytes := range bytesToWrite {
+				for _, b := range bytes {
+					requestMsg[writeIdx] = b
+					writeIdx++
+				}
+			}
+			assert(writeIdx == len(requestMsg), "Expect all bytes written")
+			bytesWritten, err = conn.Write(requestMsg[:])
+			exit_on_error(err)
+			assert(bytesWritten == len(requestMsg), "Expect to send the whole message")
+
+			// piece message
+			// 4-byter message length, 1-byte message id, and a payload of
+			// - 4-byte block index
+			// - 4-byte block offset within the piece (in bytes)
+			// - data
+			pieceMsgHdr := make([]byte, 5)
+			bytesRead, err = conn.Read(pieceMsgHdr)
+			exit_on_error(err)
+			totalBytesToRead := int(binary.BigEndian.Uint32(pieceMsgHdr[0:4]))
+			assert(bytesRead == 5, "Expect to read the full header")
+			assert(pieceMsgHdr[4] == 7, "Expect message id = 7")
+			totalBytesToRead -= 1
+
+			pieceMsgMetadata := make([]byte, 8)
+			bytesRead, err = conn.Read(pieceMsgMetadata)
+			exit_on_error(err)
+			assert(bytesRead == 8, "Expect to read 8 bytes of metadata")
+			receivedBlockIdx := int(binary.BigEndian.Uint32(pieceMsgMetadata[:4]))
+			receivedBlockStartOffset := int(binary.BigEndian.Uint32(pieceMsgMetadata[4:8]))
+			assert(blockIdx == receivedBlockIdx, "blockIdx doesn't match received")
+			assert(blockOffset == receivedBlockStartOffset, "blockOffset doesn't match received")
+			totalBytesToRead -= 8
+
+			for writeOffset := 0; totalBytesToRead > 0; {
+				bytesRead, err = conn.Read(pieceData[blockOffset+writeOffset:])
+				exit_on_error(err)
+
+				totalBytesToRead -= bytesRead
+				writeOffset += bytesRead
+			}
+		}
+
+		err = os.WriteFile(outputFilename, pieceData, 0644)
+		exit_on_error(err)
+
+		fmt.Printf("Piece %v downloaded to %v\n", piece, outputFilename)
 	} else {
 		fmt.Println("Unknown command: " + command)
 		os.Exit(1)
