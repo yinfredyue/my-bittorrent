@@ -53,7 +53,7 @@ func encode(sb *strings.Builder, v interface{}) error {
 		}
 		sb.WriteString("e")
 	default:
-		return fmt.Errorf("unhandled case")
+		return fmt.Errorf("encode: unhandled case")
 	}
 
 	return nil

@@ -351,6 +351,7 @@ func main() {
 		// for each block in the piece:
 		// send a request message
 		// read a piece message
+		DPrintf("pieceLength: %v\n", torrent.info.pieceLength)
 		for blockIdx := 0; blockIdx*BlockMaxSize < torrent.info.pieceLength; blockIdx++ {
 			// request message
 			var blockSize int
@@ -369,10 +370,10 @@ func main() {
 			// Note: message length starts counting from the message id.
 			msgLengthBytes := uint32_to_bytes(13, 4)
 			msgIdBytes := uint32_to_bytes(6, 1)
-			blockIdxBytes := uint32_to_bytes(uint32(blockIdx), 4)
+			pieceIdxBytes := uint32_to_bytes(uint32(piece), 4)
 			blockOffsetBytes := uint32_to_bytes(uint32(blockOffset), 4)
 			blockLengthBytes := uint32_to_bytes(uint32(blockSize), 4)
-			bytesToWrite := []([]byte){msgLengthBytes, msgIdBytes, blockIdxBytes, blockOffsetBytes, blockLengthBytes}
+			bytesToWrite := []([]byte){msgLengthBytes, msgIdBytes, pieceIdxBytes, blockOffsetBytes, blockLengthBytes}
 
 			var requestMsg [17]byte
 			writeIdx := 0
@@ -404,20 +405,33 @@ func main() {
 			bytesRead, err = conn.Read(pieceMsgMetadata)
 			exit_on_error(err)
 			assert(bytesRead == 8, "Expect to read 8 bytes of metadata")
-			receivedBlockIdx := int(binary.BigEndian.Uint32(pieceMsgMetadata[:4]))
+			receivedPieceIdx := int(binary.BigEndian.Uint32(pieceMsgMetadata[:4]))
 			receivedBlockStartOffset := int(binary.BigEndian.Uint32(pieceMsgMetadata[4:8]))
-			assert(blockIdx == receivedBlockIdx, "blockIdx doesn't match received")
+			assert(piece == receivedPieceIdx, "blockIdx doesn't match received")
 			assert(blockOffset == receivedBlockStartOffset, "blockOffset doesn't match received")
 			totalBytesToRead -= 8
 
 			for writeOffset := 0; totalBytesToRead > 0; {
 				bytesRead, err = conn.Read(pieceData[blockOffset+writeOffset:])
 				exit_on_error(err)
+				DPrintf("writeOffset+blockOffset: %v, bytesRead: %v, Finished at: %v\n",
+					writeOffset+blockOffset, bytesRead, writeOffset+blockOffset+bytesRead)
 
 				totalBytesToRead -= bytesRead
 				writeOffset += bytesRead
 			}
 		}
+
+		// check hash
+		h := sha1.New()
+		h.Write(pieceData)
+		pieceHash := h.Sum(nil)
+		expectedHash := torrent.info.pieces[piece]
+		DPrintf("Hash of received piece: %v, expected piece hash: %v", pieceHash, []byte(expectedHash))
+		assert(string(pieceHash) == string(expectedHash),
+			fmt.Sprintf("Piece hash mismatch. Expected: %v (len=%v) (hex=%v), got: %v (len=%v) (hex=%v)\n",
+				[]byte(expectedHash), len(expectedHash), hex.EncodeToString([]byte(expectedHash)),
+				pieceHash, len(pieceHash), hex.EncodeToString([]byte(pieceHash))))
 
 		err = os.WriteFile(outputFilename, pieceData, 0644)
 		exit_on_error(err)
