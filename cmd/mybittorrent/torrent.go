@@ -145,70 +145,8 @@ func (torrent *Torrent) discoverPeers() ([]netip.AddrPort, error) {
 	return peer_addrports, nil
 }
 
-func (torrent *Torrent) downloadPiece(piece int) ([]byte, error) {
-	peers, err := torrent.discoverPeers()
-	if err != nil {
-		return []byte{}, err
-	}
-
-	infoHash, err := torrent.info.hash()
-	if err != nil {
-		return []byte{}, nil
-	}
-
-	peer := peers[0]
-	conn, err := net.Dial("tcp", peer.String())
-	if err != nil {
-		return []byte{}, nil
-	}
-
-	defer conn.Close()
-
-	handshakeMsg := HandshakeMsg(infoHash, []byte("deadbeefliveporkhaha"))
-	bytesWritten, err := conn.Write([]byte(handshakeMsg))
-	assert(bytesWritten == 68, "Expect to write 68 bytes for handshake")
-	if err != nil {
-		return []byte{}, nil
-	}
-
-	// handshake response
-	response := make([]byte, 68)
-	bytesRead, err := conn.Read(response)
-	if err != nil {
-		return []byte{}, nil
-	}
-	assert(bytesRead == 68, "Expect handshake response to be 68 bytes")
-	DPrintf("handshake response received\n")
-
-	// bitfield message
-	bitfieldMsg := make([]byte, 128)
-	bytesRead, err = conn.Read(bitfieldMsg)
-	if err != nil {
-		return []byte{}, nil
-	}
-	assert(bytesRead >= 5, "Expect to read at least 5 bytes")
-	assert(uint8(bitfieldMsg[4]) == 5, "bitfield message should have message id = 5")
-	DPrintf("bitfield received\n")
-
-	// send interested message
-	interestedMsg := [5]byte{0, 0, 0, 5, 2}
-	bytesWritten, err = conn.Write(interestedMsg[:])
-	assert(bytesWritten == 5, "Expect to write 5 bytes for interested message")
-	if err != nil {
-		return []byte{}, nil
-	}
-	DPrintf("interested message sent\n")
-
-	// unchoke message
-	unchokeMsg := make([]byte, 128)
-	bytesRead, err = conn.Read(unchokeMsg)
-	if err != nil {
-		return []byte{}, nil
-	}
-	assert(bytesRead == 5, "Expect to read 5 bytes for unchoke message")
-	assert(uint8(unchokeMsg[4]) == 1, "unchoke message should have message id = 1")
-	DPrintf("unchoke message received\n")
-
+// Assume handshake, bitfield, interested, unchoke are done already
+func (torrent *Torrent) downloadPieceCore(piece int, conn net.Conn) ([]byte, error) {
 	// for each block in the piece:
 	// send a request message
 	// read a piece message
@@ -252,7 +190,7 @@ func (torrent *Torrent) downloadPiece(piece int) ([]byte, error) {
 			}
 		}
 		assert(writeIdx == len(requestMsg), "Expect all bytes written")
-		bytesWritten, err = conn.Write(requestMsg[:])
+		bytesWritten, err := conn.Write(requestMsg[:])
 		if err != nil {
 			return []byte{}, nil
 		}
@@ -264,7 +202,7 @@ func (torrent *Torrent) downloadPiece(piece int) ([]byte, error) {
 		// - 4-byte block offset within the piece (in bytes)
 		// - data
 		pieceMsgHdr := make([]byte, 5)
-		bytesRead, err = conn.Read(pieceMsgHdr)
+		bytesRead, err := conn.Read(pieceMsgHdr)
 		if err != nil {
 			return []byte{}, nil
 		}
@@ -298,6 +236,88 @@ func (torrent *Torrent) downloadPiece(piece int) ([]byte, error) {
 		}
 	}
 
+	return pieceData, nil
+}
+
+// Discover peers and exchange messages required before starting downloading pieces.
+// Returns a connection to one of the peers. The caller should close the connection when finished.
+func (torrent *Torrent) prepareForDownload() (net.Conn, error) {
+	peers, err := torrent.discoverPeers()
+	if err != nil {
+		return nil, err
+	}
+
+	infoHash, err := torrent.info.hash()
+	if err != nil {
+		return nil, err
+	}
+
+	peer := peers[0]
+	conn, err := net.Dial("tcp", peer.String())
+	if err != nil {
+		return nil, err
+	}
+
+	handshakeMsg := HandshakeMsg(infoHash, []byte("deadbeefliveporkhaha"))
+	bytesWritten, err := conn.Write([]byte(handshakeMsg))
+	assert(bytesWritten == 68, "Expect to write 68 bytes for handshake")
+	if err != nil {
+		return nil, err
+	}
+
+	// handshake response
+	response := make([]byte, 68)
+	bytesRead, err := conn.Read(response)
+	if err != nil {
+		return nil, err
+	}
+	assert(bytesRead == 68, "Expect handshake response to be 68 bytes")
+	DPrintf("handshake response received\n")
+
+	// bitfield message
+	bitfieldMsg := make([]byte, 128)
+	bytesRead, err = conn.Read(bitfieldMsg)
+	if err != nil {
+		return nil, err
+	}
+	assert(bytesRead >= 5, "Expect to read at least 5 bytes")
+	assert(uint8(bitfieldMsg[4]) == 5, "bitfield message should have message id = 5")
+	DPrintf("bitfield received\n")
+
+	// send interested message
+	interestedMsg := [5]byte{0, 0, 0, 5, 2}
+	bytesWritten, err = conn.Write(interestedMsg[:])
+	assert(bytesWritten == 5, "Expect to write 5 bytes for interested message")
+	if err != nil {
+		return nil, err
+	}
+	DPrintf("interested message sent\n")
+
+	// unchoke message
+	unchokeMsg := make([]byte, 128)
+	bytesRead, err = conn.Read(unchokeMsg)
+	if err != nil {
+		return nil, err
+	}
+	assert(bytesRead == 5, "Expect to read 5 bytes for unchoke message")
+	assert(uint8(unchokeMsg[4]) == 1, "unchoke message should have message id = 1")
+	DPrintf("unchoke message received\n")
+
+	return conn, nil
+}
+
+func (torrent *Torrent) downloadPiece(piece int) ([]byte, error) {
+	conn, err := torrent.prepareForDownload()
+	if err != nil {
+		return []byte{}, nil
+	}
+	defer conn.Close()
+
+	pieceData, err := torrent.downloadPieceCore(piece, conn)
+	if err != nil {
+		return []byte{}, nil
+	}
+
 	// check hash
 	h := sha1.New()
 	h.Write(pieceData)
@@ -322,8 +342,14 @@ func (torrent *Torrent) downloadFile(outputFilename string) error {
 	exit_on_error(err)
 	defer outputFile.Close()
 
+	conn, err := torrent.prepareForDownload()
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
 	for p := 0; p < torrent.numPieces(); p++ {
-		piece, err := torrent.downloadPiece(p)
+		piece, err := torrent.downloadPieceCore(p, conn)
 		if err != nil {
 			return err
 		}
