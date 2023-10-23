@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"math/rand"
 	"net"
 	"net/http"
 	"net/netip"
@@ -132,16 +133,35 @@ func (torrent *Torrent) discoverPeers() ([]netip.AddrPort, error) {
 	}
 
 	decoded_dict := decoded_resp.(map[string](interface{}))
-	peers := decoded_dict["peers"].(string)
+
 	peer_addrports := make([]netip.AddrPort, 0)
-	for i := 0; i < len(peers); i += 6 {
-		// Each peer is represented with 6 bytes.
-		// First 4 bytes is IP, where each byte is a number in the IP.
-		// Last 2 bytes is port, in big-endian order.
-		port := binary.BigEndian.Uint16([]byte(peers[i+4 : i+6]))
-		addrBytes := [4]byte{peers[i], peers[i+1], peers[i+2], peers[i+3]}
-		addrport := netip.AddrPortFrom(netip.AddrFrom4(addrBytes), port)
-		peer_addrports = append(peer_addrports, addrport)
+	switch peers := decoded_dict["peers"].(type) {
+	case string:
+		// compact
+		for i := 0; i < len(peers); i += 6 {
+			// Each peer is represented with 6 bytes.
+			// First 4 bytes is IP, where each byte is a number in the IP.
+			// Last 2 bytes is port, in big-endian order.
+			port := binary.BigEndian.Uint16([]byte(peers[i+4 : i+6]))
+			addrBytes := [4]byte{peers[i], peers[i+1], peers[i+2], peers[i+3]}
+			addrport := netip.AddrPortFrom(netip.AddrFrom4(addrBytes), port)
+			peer_addrports = append(peer_addrports, addrport)
+		}
+	case [](interface{}):
+		// noncompact
+		for _, peerRaw := range peers {
+			peer := peerRaw.(map[string]interface{})
+			ipStr := peer["ip"].(string)
+			addr, err := netip.ParseAddr(ipStr)
+			if err != nil {
+				return nil, err
+			}
+			port := peer["port"].(int)
+			addrport := netip.AddrPortFrom(addr, uint16(port))
+			peer_addrports = append(peer_addrports, addrport)
+		}
+	default:
+		return nil, fmt.Errorf("unexpected case")
 	}
 
 	return peer_addrports, nil
@@ -194,9 +214,10 @@ func (torrent *Torrent) downloadPieceCore(piece int, conn net.Conn) ([]byte, err
 		assert(writeIdx == len(requestMsg), "Expect all bytes written")
 		bytesWritten, err := conn.Write(requestMsg[:])
 		if err != nil {
-			return []byte{}, nil
+			return []byte{}, err
 		}
 		assert(bytesWritten == len(requestMsg), "Expect to send the whole message")
+		DPrintf("Sent out request msg")
 
 		// piece message
 		// 4-byter message length, 1-byte message id, and a payload of
@@ -206,7 +227,7 @@ func (torrent *Torrent) downloadPieceCore(piece int, conn net.Conn) ([]byte, err
 		pieceMsgHdr := make([]byte, 5)
 		bytesRead, err := conn.Read(pieceMsgHdr)
 		if err != nil {
-			return []byte{}, nil
+			return []byte{}, err
 		}
 		totalBytesToRead := int(binary.BigEndian.Uint32(pieceMsgHdr[0:4]))
 		assert(bytesRead == 5, "Expect to read the full header")
@@ -216,7 +237,7 @@ func (torrent *Torrent) downloadPieceCore(piece int, conn net.Conn) ([]byte, err
 		pieceMsgMetadata := make([]byte, 8)
 		bytesRead, err = conn.Read(pieceMsgMetadata)
 		if err != nil {
-			return []byte{}, nil
+			return []byte{}, err
 		}
 		assert(bytesRead == 8, "Expect to read 8 bytes of metadata")
 		receivedPieceIdx := int(binary.BigEndian.Uint32(pieceMsgMetadata[:4]))
@@ -228,7 +249,7 @@ func (torrent *Torrent) downloadPieceCore(piece int, conn net.Conn) ([]byte, err
 		for writeOffset := 0; totalBytesToRead > 0; {
 			bytesRead, err = conn.Read(pieceData[blockOffset+writeOffset:])
 			if err != nil {
-				return []byte{}, nil
+				return []byte{}, err
 			}
 			DPrintf("totalBytesToRead: %v, writeOffset+blockOffset: %v, bytesRead: %v, Finished at: %v\n",
 				totalBytesToRead, writeOffset+blockOffset, bytesRead, writeOffset+blockOffset+bytesRead)
@@ -254,7 +275,8 @@ func (torrent *Torrent) prepareForDownload() (net.Conn, error) {
 		return nil, err
 	}
 
-	peer := peers[0]
+	peer := peers[rand.Intn(len(peers))]
+	DPrintf("Dialing peer %v...\n", peer)
 	conn, err := net.Dial("tcp", peer.String())
 	if err != nil {
 		return nil, err
@@ -277,17 +299,25 @@ func (torrent *Torrent) prepareForDownload() (net.Conn, error) {
 	DPrintf("handshake response received\n")
 
 	// bitfield message
-	bitfieldMsg := make([]byte, 128)
-	bytesRead, err = conn.Read(bitfieldMsg)
+	// Note: this message is optional in reality
+	bitfieldMsgHdr := make([]byte, 5)
+	bytesRead, err = conn.Read(bitfieldMsgHdr)
 	if err != nil {
 		return nil, err
 	}
-	assert(bytesRead >= 5, "Expect to read at least 5 bytes")
-	assert(uint8(bitfieldMsg[4]) == 5, "bitfield message should have message id = 5")
-	DPrintf("bitfield received\n")
+	assert(bytesRead == 5, "Expect to read 5 bytes")
+	assert(uint8(bitfieldMsgHdr[4]) == 5, fmt.Sprintf("bitfield message should have message id = 5, but got %v", bitfieldMsgHdr[4]))
+	numBytesBitfieldMsgPayload := int(binary.BigEndian.Uint32(bitfieldMsgHdr[:4])) - 1
+	bitfieldMsgPayload := make([]byte, numBytesBitfieldMsgPayload)
+	bytesRead, err = conn.Read(bitfieldMsgPayload)
+	if err != nil {
+		return nil, err
+	}
+	assert(bytesRead == numBytesBitfieldMsgPayload, "expect to read full bitfield payload")
+	DPrintf("Bitfield received. Payload: %v\n", hex.EncodeToString(bitfieldMsgPayload))
 
 	// send interested message
-	interestedMsg := [5]byte{0, 0, 0, 5, 2}
+	interestedMsg := [5]byte{0, 0, 0, 1, 2}
 	bytesWritten, err = conn.Write(interestedMsg[:])
 	assert(bytesWritten == 5, "Expect to write 5 bytes for interested message")
 	if err != nil {
@@ -296,13 +326,13 @@ func (torrent *Torrent) prepareForDownload() (net.Conn, error) {
 	DPrintf("interested message sent\n")
 
 	// unchoke message
-	unchokeMsg := make([]byte, 128)
+	unchokeMsg := make([]byte, 5)
 	bytesRead, err = conn.Read(unchokeMsg)
 	if err != nil {
 		return nil, err
 	}
-	assert(bytesRead == 5, "Expect to read 5 bytes for unchoke message")
-	assert(uint8(unchokeMsg[4]) == 1, "unchoke message should have message id = 1")
+	assert(bytesRead == 5, fmt.Sprintf("Expect to read 5 bytes for unchoke message, but got %v bytes", bytesRead))
+	assert(uint8(unchokeMsg[4]) == 1, fmt.Sprintf("unchoke message should have message id = 1, but got id = %v", uint8(unchokeMsg[4])))
 	DPrintf("unchoke message received\n")
 
 	return conn, nil
@@ -311,13 +341,13 @@ func (torrent *Torrent) prepareForDownload() (net.Conn, error) {
 func (torrent *Torrent) downloadPiece(piece int) ([]byte, error) {
 	conn, err := torrent.prepareForDownload()
 	if err != nil {
-		return []byte{}, nil
+		return []byte{}, err
 	}
 	defer conn.Close()
 
 	pieceData, err := torrent.downloadPieceCore(piece, conn)
 	if err != nil {
-		return []byte{}, nil
+		return []byte{}, err
 	}
 
 	// check hash
@@ -444,7 +474,7 @@ func (torrent *Torrent) downloadFilePipelining(outputFilename string) error {
 		}
 		totalBytesToRead := int(binary.BigEndian.Uint32(pieceMsgHdr[0:4]))
 		assert(bytesRead == 5, "Expect to read the full header")
-		assert(pieceMsgHdr[4] == 7, "Expect message id = 7")
+		assert(pieceMsgHdr[4] == 7, fmt.Sprintf("Expect message id = 7, but get %v", pieceMsgHdr[4]))
 		totalBytesToRead -= 1
 
 		pieceMsgMetadata := make([]byte, 8)

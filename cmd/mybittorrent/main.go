@@ -3,7 +3,9 @@ package main
 import (
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"strconv"
@@ -71,10 +73,10 @@ func main() {
 		fmt.Printf("Info Hash: %s\n", hex.EncodeToString(info_hash))
 
 		fmt.Printf("Piece Length: %v\n", torrent.info.pieceLength)
-		fmt.Printf("Piece Hashes:\n")
-		for _, piece_hash := range torrent.info.pieces {
-			fmt.Printf("%v\n", hex.EncodeToString([]byte(piece_hash)))
-		}
+		// fmt.Printf("Piece Hashes:\n")
+		// for _, piece_hash := range torrent.info.pieces {
+		// 	fmt.Printf("%v\n", hex.EncodeToString([]byte(piece_hash)))
+		// }
 	} else if command == "peers" {
 		if len(os.Args) != 3 {
 			fmt.Println("Expect a file name")
@@ -123,7 +125,9 @@ func main() {
 
 		response := make([]byte, 68)
 		_, err = conn.Read(response)
-		exit_on_error(err)
+		if err != nil && !errors.Is(err, io.EOF) {
+			exit_on_error(err)
+		}
 
 		fmt.Printf("Peer ID: %v\n", hex.EncodeToString(response[48:]))
 	} else if command == "download_piece" {
