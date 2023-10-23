@@ -17,6 +17,8 @@ import (
 	"github.com/codecrafters-io/bittorrent-starter-go/encode"
 )
 
+const PipelineSize = 5
+
 type Info struct {
 	length      int
 	name        string
@@ -333,12 +335,7 @@ func (torrent *Torrent) downloadPiece(piece int) ([]byte, error) {
 }
 
 func (torrent *Torrent) downloadFile(outputFilename string) error {
-	err := deleteFileIfExists(outputFilename)
-	if err != nil {
-		return err
-	}
-
-	outputFile, err := os.OpenFile(outputFilename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	outputFile, err := os.OpenFile(outputFilename, os.O_CREATE|os.O_WRONLY, 0644)
 	exit_on_error(err)
 	defer outputFile.Close()
 
@@ -359,5 +356,146 @@ func (torrent *Torrent) downloadFile(outputFilename string) error {
 			return err
 		}
 	}
+	return nil
+}
+
+func (torrent *Torrent) requestMsgs() []([]byte) {
+	msgs := make([]([]byte), 0)
+
+	for piece := 0; piece < torrent.numPieces(); piece++ {
+		var pieceLength int
+		if piece < torrent.numPieces()-1 {
+			pieceLength = torrent.info.pieceLength
+		} else {
+			pieceLength = torrent.info.length % torrent.info.pieceLength
+		}
+		for blockIdx := 0; blockIdx*BlockMaxSize < pieceLength; blockIdx++ {
+			// request message
+			var blockSize int
+			if (blockIdx+1)*BlockMaxSize < pieceLength {
+				blockSize = BlockMaxSize
+			} else {
+				blockSize = pieceLength - blockIdx*BlockMaxSize
+			}
+			DPrintf("piece: %v, BlockIdx: %v, BlockSize: %v\n", piece, blockIdx, blockSize)
+			blockOffset := blockIdx * BlockMaxSize
+
+			// 4-byte message length, 1-byte message id, and a payload of:
+			// - 4-byte block index
+			// - 4-byte block offset within the piece (in bytes)
+			// - 4-byte block length
+			// Note: message length starts counting from the message id.
+			msgLengthBytes := uint32_to_bytes(13, 4)
+			msgIdBytes := uint32_to_bytes(6, 1)
+			pieceIdxBytes := uint32_to_bytes(uint32(piece), 4)
+			blockOffsetBytes := uint32_to_bytes(uint32(blockOffset), 4)
+			blockLengthBytes := uint32_to_bytes(uint32(blockSize), 4)
+			bytesToWrite := []([]byte){msgLengthBytes, msgIdBytes, pieceIdxBytes, blockOffsetBytes, blockLengthBytes}
+
+			var requestMsg [17]byte
+			writeIdx := 0
+			for _, bytes := range bytesToWrite {
+				for _, b := range bytes {
+					requestMsg[writeIdx] = b
+					writeIdx++
+				}
+			}
+			assert(writeIdx == len(requestMsg), "Expect all bytes written")
+			msgs = append(msgs, requestMsg[:])
+		}
+	}
+
+	return msgs
+}
+
+func (torrent *Torrent) downloadFilePipelining(outputFilename string) error {
+	outputFile, err := os.OpenFile(outputFilename, os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+
+	conn, err := torrent.prepareForDownload()
+	if err != nil {
+		return err
+	}
+
+	allRequestMsgs := torrent.requestMsgs()
+
+	// send out initial PipelineSize number of requests
+	nextRequestMsg := 0
+	for ; nextRequestMsg < PipelineSize; nextRequestMsg++ {
+		numBytesWritten, err := conn.Write(allRequestMsgs[nextRequestMsg])
+		if err != nil {
+			return err
+		}
+		assert(numBytesWritten == len(allRequestMsgs[nextRequestMsg]), "expect full message to be sent")
+	}
+
+	for numBlocksToReceive := len(allRequestMsgs); numBlocksToReceive > 0; numBlocksToReceive-- {
+		// piece message
+		// 4-byter message length, 1-byte message id, and a payload of
+		// - 4-byte block index
+		// - 4-byte block offset within the piece (in bytes)
+		// - data
+		pieceMsgHdr := make([]byte, 5)
+		bytesRead, err := conn.Read(pieceMsgHdr)
+		if err != nil {
+			return err
+		}
+		totalBytesToRead := int(binary.BigEndian.Uint32(pieceMsgHdr[0:4]))
+		assert(bytesRead == 5, "Expect to read the full header")
+		assert(pieceMsgHdr[4] == 7, "Expect message id = 7")
+		totalBytesToRead -= 1
+
+		pieceMsgMetadata := make([]byte, 8)
+		bytesRead, err = conn.Read(pieceMsgMetadata)
+		if err != nil {
+			return err
+		}
+		assert(bytesRead == 8, "Expect to read 8 bytes of metadata")
+		pieceIdx := int(binary.BigEndian.Uint32(pieceMsgMetadata[:4]))
+		blockStartInPiece := int(binary.BigEndian.Uint32(pieceMsgMetadata[4:8]))
+		totalBytesToRead -= 8
+		blockSize := totalBytesToRead
+
+		blockData := make([]byte, blockSize)
+		for writeOffset := 0; totalBytesToRead > 0; {
+			bytesRead, err = conn.Read(blockData[writeOffset:])
+			if err != nil {
+				return err
+			}
+			DPrintf("totalBytesToRead: %v, writeOffset: %v, bytesRead: %v, Finished at: %v\n",
+				totalBytesToRead, writeOffset, bytesRead, writeOffset+bytesRead)
+
+			totalBytesToRead -= bytesRead
+			writeOffset += bytesRead
+		}
+
+		// write blockData to correct position in file
+		pieceStartOffsetGlobal := pieceIdx * BlockMaxSize
+		blockStartOffsetGlobal := pieceStartOffsetGlobal + blockStartInPiece
+		numBytesWritten, err := outputFile.WriteAt(blockData, int64(blockStartOffsetGlobal))
+		if err != nil {
+			return err
+		}
+		assert(numBytesWritten == blockSize, "Expect to write the full block")
+
+		// send out next request message, if any left
+		if nextRequestMsg < len(allRequestMsgs) {
+			numBytesWritten, err := conn.Write(allRequestMsgs[nextRequestMsg])
+			if err != nil {
+				return err
+			}
+			assert(numBytesWritten == len(allRequestMsgs[nextRequestMsg]), "expect full message to be sent")
+
+			nextRequestMsg++
+			if nextRequestMsg == len(allRequestMsgs) {
+				DPrintf("Finished sending all request messages")
+			}
+		}
+	}
+
+	// TODO: check hash
+
 	return nil
 }

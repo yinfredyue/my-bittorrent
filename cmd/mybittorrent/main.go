@@ -162,7 +162,8 @@ func main() {
 		torrent, err := parseTorrent(string(bytes))
 		exit_on_error(err)
 
-		err = torrent.downloadFile(outputFilename)
+		// err = torrent.downloadFile(outputFilename)
+		err = torrent.downloadFilePipelining(outputFilename)
 		exit_on_error(err)
 
 		fmt.Printf("Downloaded %v to %v\n", torrent.info.name, outputFilename)
