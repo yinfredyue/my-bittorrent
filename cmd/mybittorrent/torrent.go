@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"os"
 	"strconv"
 	"strings"
 
@@ -309,4 +310,28 @@ func (torrent *Torrent) downloadPiece(piece int) ([]byte, error) {
 			pieceHash, len(pieceHash), hex.EncodeToString([]byte(pieceHash))))
 
 	return pieceData, nil
+}
+
+func (torrent *Torrent) downloadFile(outputFilename string) error {
+	err := deleteFileIfExists(outputFilename)
+	if err != nil {
+		return err
+	}
+
+	outputFile, err := os.OpenFile(outputFilename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	exit_on_error(err)
+	defer outputFile.Close()
+
+	for p := 0; p < torrent.numPieces(); p++ {
+		piece, err := torrent.downloadPiece(p)
+		if err != nil {
+			return err
+		}
+
+		_, err = outputFile.Write(piece)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }

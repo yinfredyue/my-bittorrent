@@ -162,17 +162,8 @@ func main() {
 		torrent, err := parseTorrent(string(bytes))
 		exit_on_error(err)
 
-		outputFile, err := os.OpenFile(outputFilename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		err = torrent.downloadFile(outputFilename)
 		exit_on_error(err)
-		defer outputFile.Close()
-
-		for p := 0; p < torrent.numPieces(); p++ {
-			piece, err := torrent.downloadPiece(p)
-			exit_on_error(err)
-
-			_, err = outputFile.Write(piece)
-			exit_on_error(err)
-		}
 
 		fmt.Printf("Downloaded %v to %v\n", torrent.info.name, outputFilename)
 	} else {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"os"
 )
@@ -30,5 +31,15 @@ func exit_on_error(err error) {
 func assert(condition bool, errMsg string) {
 	if !condition {
 		panic(errMsg)
+	}
+}
+
+func deleteFileIfExists(filepath string) error {
+	if _, err := os.Stat(filepath); err == nil {
+		return os.Remove(filepath)
+	} else if errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else {
+		return err
 	}
 }
